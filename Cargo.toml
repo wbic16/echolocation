@@ -1,0 +1,8 @@
+[package]
+name = "echolocation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libphext = "0.6.6"
+xxhash-rust = { version = "0.8.21", features = ["xxh64"] }

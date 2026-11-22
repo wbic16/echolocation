@@ -1,0 +1,21 @@
+=== Act 1: discovery in universe 1.1.1 ===
+[2026-11-22T17:28:00Z EE 99] ni-knight-runner answering in universe 1.1.1 (listening: 1.1.1), home 1.1.1/1.1.1/9.4.1, capabilities: time-census, consensus, blend
+[2026-11-22T17:28:01Z EE 99] mira emitted probe mira@1.1.1#99-1-0454 into universe 1.1.1 (intent: time-census, reply at 1.1.1/1.1.1/2.1.1, expires 2026-11-22T17:28:05Z)
+[2026-11-22T17:28:01Z EE 99] ni-knight-runner echoed probe mira@1.1.1#99-1-0454 from mira at 1.1.1/1.1.1/2.1.1
+[2026-11-22T17:28:06Z EE 99] mira got echo #1 from ni-knight-runner (home 1.1.1/1.1.1/9.4.1, home universe 1.1.1): capabilities [time-census, consensus, blend], state: round 34 complete; consensus +0.006 ms, mailbox: 1.1.1/1.4.1/1.1.1
+[2026-11-22T17:28:06Z EE 99] mira range: 201 ms (poll: prober 100 ms; an upper bound — see SPEC §5)
+[2026-11-22T17:28:08Z EE 99] ni-knight-runner done listening
+
+=== Act 2: a probe across universes (1.1.1 -> 2.1.1) ===
+[2026-11-22T17:28:08Z EE 99] far-seat answering in universe 2.1.1 (listening: 2.1.1), home 2.1.1/1.1.1/9.4.1, capabilities: cartography
+[2026-11-22T17:28:09Z EE 99] far-seat echoed probe mira@2.1.1#99-1-a8f7 from mira at 1.1.1/1.1.1/2.1.2
+[2026-11-22T17:28:09Z EE 99] mira emitted probe mira@2.1.1#99-1-a8f7 into universe 2.1.1 (intent: cartography, reply at 1.1.1/1.1.1/2.1.1, expires 2026-11-22T17:28:15Z)
+[2026-11-22T17:28:09Z EE 99] mira got echo #2 from far-seat (home 2.1.1/1.1.1/9.4.1, home universe 2.1.1): capabilities [cartography], state: surveying the far shelf, mailbox: 2.1.1/1.4.1/1.1.1
+[2026-11-22T17:28:09Z EE 99] mira range: 1 ms (poll: prober 100 ms; an upper bound — see SPEC §5)
+[2026-11-22T17:28:16Z EE 99] far-seat done listening
+
+=== Act 3: a probe into silence (universe 3.1.1) ===
+[2026-11-22T17:28:16Z EE 99] mira emitted probe mira@3.1.1#99-1-9a79 into universe 3.1.1 (intent: any, reply at 1.1.1/1.1.1/2.1.1, expires 2026-11-22T17:28:19Z)
+[2026-11-22T17:28:20Z EE 99] mira heard silence — probe expired with no echo (absence, not assent)
+
+=== The medium afterwards: demo-run/medium.phext (1768 bytes) ===
