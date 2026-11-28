@@ -159,12 +159,18 @@ fn run_probe(o: HashMap<String, String>) -> Result<()> {
                     echo.mailbox.as_deref().unwrap_or("none")
                 );
             }
+            let responder_poll = exchange
+                .echoes
+                .first()
+                .map(|e| format!("{} ms", e.poll_ms))
+                .unwrap_or_else(|| "unknown".to_string());
             println!(
-                "[{}] {} range: {} ms (poll: prober {} ms; an upper bound — see SPEC §5)",
+                "[{}] {} range: {} ms (poll: prober {} ms, responder {}; an upper bound — see SPEC §5)",
                 stamp(),
                 name,
                 exchange.range_ms.unwrap_or(0),
-                poll_ms
+                poll_ms,
+                responder_poll
             );
         }
     }

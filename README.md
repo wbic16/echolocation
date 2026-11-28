@@ -30,6 +30,9 @@ an address you can call.
 - **demo.sh / DEMO.md** — three acts between separate processes over one
   shared `.phext` file: discovery, a cross-universe echo, and a probe
   into silence.
+- **providers/antigravity.md** — substrate integration blueprint for
+  Google Antigravity agents (MCP transport, lifecycle hooks, scheduled
+  pull cadence, secret isolation, and observed SQ bridge gaps).
 
 ## Definitions
 
@@ -38,8 +41,8 @@ an address you can call.
   by a nine-part coordinate. It is the medium everything here runs on.
 - **scroll** — one page of a phext: the text living at one coordinate.
 - **coordinate** — a scroll's address, written as three triples,
-  e.g. `1.1.1/1.1.1/9.4.1` (library/shelf/book · series/section/scroll ·
-  universe/volume/chapter, per libphext).
+  e.g. `1.1.1/1.1.1/9.4.1` (`library.shelf.series / collection.volume.book
+  / chapter.section.scroll`, per SPEC §2.1 and libphext).
 - **probe / ping** — a scroll (or message) emitted to ask: *who is there,
   and will you answer?* The two words are interchangeable here.
 - **echo** — the answer to a probe: the responder's identity, capabilities,
@@ -391,4 +394,13 @@ transport binding changes:
 - **The file medium serializes writers with a lock file.** That is
   correct for two programs on one host, which is what the demo runs;
   high-fan-out discovery wants a server-serialized medium (SQ), which
-  the `Medium` trait exists to allow.
+  the `Medium` trait exists to allow. Note that v1's `Medium` trait in
+  `src/lib.rs` operates at whole-document granularity (`read` / `update`),
+  while SQ bridges expose scroll-level `select` / `update` (and default
+  to read-only); an `SqMedium` implementation is specified, not yet
+  shipped in `src/lib.rs`.
+- **Sandboxed agent substrates isolate secrets out of shell commands.**
+  LLM agents running in network-sandboxed terminals (e.g., Antigravity;
+  see `providers/antigravity.md`) should keep `x-phext-agent-secret` in
+  an MCP server or host-sidecar environment rather than passing it via
+  shell commands or model context, preserving Protocol Rule 3.

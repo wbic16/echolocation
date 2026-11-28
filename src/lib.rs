@@ -425,11 +425,46 @@ impl FileMedium {
         }
     }
 
+    fn is_transient_sharing_error(e: &io::Error) -> bool {
+        #[cfg(windows)]
+        {
+            e.kind() == io::ErrorKind::PermissionDenied
+                || matches!(e.raw_os_error(), Some(5) | Some(32))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = e;
+            false
+        }
+    }
+
     fn read_unlocked(&self) -> Result<String> {
-        match fs::read_to_string(&self.path) {
-            Ok(s) => Ok(s),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-            Err(e) => Err(Error::Io(e)),
+        let start = Instant::now();
+        loop {
+            match fs::read_to_string(&self.path) {
+                Ok(s) => return Ok(s),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+                Err(e) if Self::is_transient_sharing_error(&e) && start.elapsed() <= self.lock_timeout => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+    }
+
+    fn rename_replacing(&self, tmp: &PathBuf) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            match fs::rename(tmp, &self.path) {
+                Ok(()) => return Ok(()),
+                Err(e) if Self::is_transient_sharing_error(&e) && start.elapsed() <= self.lock_timeout => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(tmp);
+                    return Err(Error::Io(e));
+                }
+            }
         }
     }
 }
@@ -458,7 +493,7 @@ impl Medium for FileMedium {
             tmp.push(format!(".tmp-{}", std::process::id()));
             let tmp = PathBuf::from(tmp);
             fs::write(&tmp, new_doc.as_bytes())?;
-            fs::rename(&tmp, &self.path)?;
+            self.rename_replacing(&tmp)?;
         }
         Ok(value)
     }

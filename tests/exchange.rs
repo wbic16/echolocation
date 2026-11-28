@@ -267,3 +267,100 @@ fn cross_universe_echo_crosses_back() {
     let probe_there = phext::fetch(&doc, probe_coord("2.1.1", handle.probe.slot).unwrap());
     assert!(probe_there.contains("echolocation/probe 1"));
 }
+
+#[test]
+fn concurrent_readers_and_writers_on_file_medium() {
+    let path = temp_medium("concurrent-io");
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_path = path.clone();
+    let reader_stop = stop.clone();
+
+    let reader = std::thread::spawn(move || {
+        let mut m = FileMedium::new(reader_path);
+        let mut reads = 0usize;
+        while !reader_stop.load(Ordering::Relaxed) {
+            let _ = m.read().expect("concurrent read must not fail");
+            reads += 1;
+        }
+        reads
+    });
+
+    let mut writer = FileMedium::new(path.clone());
+    for i in 1..=25usize {
+        let payload = format!("scroll-{}", i);
+        let c = probe_coord("1.1.1", i).unwrap();
+        writer
+            .update(&mut |doc| Ok((phext::replace(doc, c, &payload), ())))
+            .expect("concurrent update must not fail");
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let reads = reader.join().unwrap();
+    assert!(reads > 0, "reader should have performed concurrent reads");
+
+    let doc = writer.read().unwrap();
+    assert_eq!(phext::fetch(&doc, probe_coord("1.1.1", 25).unwrap()), "scroll-25");
+}
+
+#[test]
+fn cli_range_reports_both_prober_and_responder_poll_ms() {
+    let path = temp_medium("cli-poll");
+    let bin = env!("CARGO_BIN_EXE_echolocate");
+
+    let mut responder = std::process::Command::new(bin)
+        .args([
+            "answer",
+            "--medium",
+            path.to_str().unwrap(),
+            "--name",
+            "cli-responder",
+            "--home",
+            "1.1.1/1.1.1/9.4.1",
+            "--capabilities",
+            "time-census",
+            "--poll-ms",
+            "75",
+            "--for",
+            "4",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn echolocate answer");
+
+    std::thread::sleep(Duration::from_millis(250));
+
+    let probe_out = std::process::Command::new(bin)
+        .args([
+            "probe",
+            "--medium",
+            path.to_str().unwrap(),
+            "--name",
+            "cli-prober",
+            "--home",
+            "1.1.1/1.1.1/9.1.1",
+            "--intent",
+            "time-census",
+            "--ttl",
+            "4",
+            "--mode",
+            "first",
+            "--poll-ms",
+            "60",
+        ])
+        .output()
+        .expect("run echolocate probe");
+
+    let _ = responder.wait();
+    assert!(
+        probe_out.status.success(),
+        "probe failed: {}",
+        String::from_utf8_lossy(&probe_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&probe_out.stdout);
+    assert!(
+        stdout.contains("poll: prober 60 ms, responder 75 ms"),
+        "expected both poll values per SPEC §5, got:\n{}",
+        stdout
+    );
+}
