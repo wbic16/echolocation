@@ -13,7 +13,8 @@ use libphext::phext;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -522,6 +523,200 @@ impl Medium for MemoryMedium {
     }
 }
 
+/// An SQ-hosted phext medium over HTTP/1.1 (`std::net::TcpStream` only, zero
+/// extra dependencies). Reads whole documents via `GET /api/v2/get?p=...` and
+/// commits only changed scrolls via server-serialized `POST /api/v2/update`,
+/// so concurrent writers to other coordinates are never clobbered.
+pub struct SqMedium {
+    pub host_port: String,
+    pub phext: String,
+    pub auth_key: Option<String>,
+    pub timeout: Duration,
+}
+
+impl SqMedium {
+    /// Construct an `SqMedium` pointing at an HTTP SQ host (e.g.,
+    /// `"http://127.0.0.1:1337"` or `"127.0.0.1:1337"`).
+    pub fn new(base_url: &str, phext: &str, auth_key: Option<String>) -> Result<SqMedium> {
+        let trimmed = base_url.trim().trim_end_matches('/');
+        if trimmed.starts_with("https://") {
+            return Err(Error::Medium(
+                "SqMedium uses std::net::TcpStream (plaintext HTTP for localhost/tailnet SQ); terminate TLS in a local proxy or MCP bridge".to_string(),
+            ));
+        }
+        let without_scheme = trimmed.strip_prefix("http://").unwrap_or(trimmed);
+        let authority = without_scheme.split('/').next().unwrap_or("");
+        if authority.is_empty() {
+            return Err(Error::Medium(format!("invalid SQ URL: {}", base_url)));
+        }
+        let host_port = if authority.contains(':') {
+            authority.to_string()
+        } else {
+            format!("{}:80", authority)
+        };
+        if phext.trim().is_empty() {
+            return Err(Error::Medium("SQ phext name cannot be empty".to_string()));
+        }
+        Ok(SqMedium {
+            host_port,
+            phext: phext.trim().to_string(),
+            auth_key,
+            timeout: Duration::from_secs(10),
+        })
+    }
+
+    /// Fetch a single scroll via `GET /api/v2/select?p=...&c=...`.
+    pub fn select(&self, coordinate: &str) -> Result<String> {
+        let path = format!(
+            "/api/v2/select?p={}&c={}",
+            percent_encode(&self.phext),
+            percent_encode(coordinate)
+        );
+        self.http_request("GET", &path, None)
+    }
+
+    /// Overwrite a single scroll via server-serialized `POST /api/v2/update?p=...&c=...`.
+    pub fn write_scroll(&self, coordinate: &str, scroll: &str) -> Result<()> {
+        let path = format!(
+            "/api/v2/update?p={}&c={}",
+            percent_encode(&self.phext),
+            percent_encode(coordinate)
+        );
+        let _ = self.http_request("POST", &path, Some(scroll))?;
+        Ok(())
+    }
+
+    fn http_request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
+        let mut stream = TcpStream::connect(&self.host_port)
+            .map_err(|e| Error::Medium(format!("SQ connect {} failed: {}", self.host_port, e)))?;
+        let _ = stream.set_read_timeout(Some(self.timeout));
+        let _ = stream.set_write_timeout(Some(self.timeout));
+
+        let payload = body.unwrap_or("");
+        let mut req = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+            method, path, self.host_port
+        );
+        if let Some(key) = &self.auth_key {
+            req.push_str(&format!("Authorization: Bearer {}\r\n", key));
+        }
+        if body.is_some() {
+            req.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+            req.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+        }
+        req.push_str("\r\n");
+
+        stream.write_all(req.as_bytes())?;
+        if !payload.is_empty() {
+            stream.write_all(payload.as_bytes())?;
+        }
+        stream.flush()?;
+
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw)?;
+
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| Error::Medium("malformed HTTP response from SQ".to_string()))?;
+        let headers = String::from_utf8_lossy(&raw[..header_end]);
+        let body_bytes = &raw[header_end + 4..];
+
+        let status_line = headers.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| Error::Medium(format!("invalid SQ HTTP status: {}", status_line)))?;
+
+        let decoded_body = if headers
+            .lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.to_ascii_lowercase().contains("chunked"))
+        {
+            decode_chunked(body_bytes)?
+        } else {
+            body_bytes.to_vec()
+        };
+
+        let text = String::from_utf8_lossy(&decoded_body).into_owned();
+        if !(200..300).contains(&status_code) {
+            return Err(Error::Medium(format!(
+                "SQ {} {} returned HTTP {}: {}",
+                method,
+                path,
+                status_code,
+                text.trim()
+            )));
+        }
+        Ok(text)
+    }
+}
+
+impl Medium for SqMedium {
+    fn read(&mut self) -> Result<String> {
+        let path = format!("/api/v2/get?p={}", percent_encode(&self.phext));
+        self.http_request("GET", &path, None)
+    }
+
+    fn update<T>(&mut self, f: &mut dyn FnMut(&str) -> Result<(String, T)>) -> Result<T> {
+        let current = self.read()?;
+        let (new_doc, value) = f(&current)?;
+        if new_doc != current {
+            let old_map = phext::explode(&current);
+            let new_map = phext::explode(&new_doc);
+            for (c, text) in &new_map {
+                if old_map.get(c) != Some(text) {
+                    self.write_scroll(&c.to_string(), text)?;
+                }
+            }
+        }
+        Ok(value)
+    }
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+fn decode_chunked(mut data: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let crlf = data
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or_else(|| Error::Medium("invalid chunked response from SQ".to_string()))?;
+        let size_str = std::str::from_utf8(&data[..crlf])
+            .map_err(|_| Error::Medium("invalid chunk size encoding".to_string()))?
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let size = usize::from_str_radix(size_str, 16)
+            .map_err(|_| Error::Medium(format!("invalid chunk size: {}", size_str)))?;
+        data = &data[crlf + 2..];
+        if size == 0 {
+            break;
+        }
+        if data.len() < size + 2 {
+            return Err(Error::Medium("truncated chunked response from SQ".to_string()));
+        }
+        out.extend_from_slice(&data[..size]);
+        data = &data[size + 2..];
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Prober side (SPEC §6.1)
 // ---------------------------------------------------------------------------
@@ -562,58 +757,67 @@ pub fn emit_probe<M: Medium>(
     if !valid_universe(target_universe) {
         return Err(Error::InvalidUniverse(target_universe.to_string()));
     }
-    let emitted_at = Instant::now();
-    let issued = now_unix();
-    let from = from.clone();
-    let intent = intent.to_string();
     let target = target_universe.to_string();
     let home = home_universe.to_string();
-    let probe = medium.update(&mut |doc| {
-        // First free probe slot in the target universe (append-only).
-        let mut slot = 1usize;
-        loop {
-            let existing = phext::fetch(doc, probe_coord(&target, slot)?);
-            if existing.is_empty() {
-                break;
+    const MAX_RESLOT_ATTEMPTS: usize = 8;
+    for _ in 0..MAX_RESLOT_ATTEMPTS {
+        let emitted_at = Instant::now();
+        let issued = now_unix();
+        let from_clone = from.clone();
+        let intent_clone = intent.to_string();
+        let target_clone = target.clone();
+        let home_clone = home.clone();
+        let probe = medium.update(&mut |doc| {
+            // First free probe slot in the target universe (append-only).
+            let mut slot = 1usize;
+            loop {
+                let existing = phext::fetch(doc, probe_coord(&target_clone, slot)?);
+                if existing.is_empty() {
+                    break;
+                }
+                slot += 1;
             }
-            slot += 1;
+            let nonce = {
+                let seed = format!("{}:{}:{}", from_clone.name, issued, slot);
+                let h = xxhash_rust::xxh64::xxh64(seed.as_bytes(), 0);
+                (h & 0xffff) as u16
+            };
+            let id = format!(
+                "{}@{}#{}-{}-{:04x}",
+                from_clone.name,
+                target_clone,
+                ee_at(issued),
+                slot,
+                nonce
+            );
+            let reply_at = echo_coord(&home_clone, slot, 1)?.to_string();
+            let probe = Probe {
+                id,
+                from: from_clone.clone(),
+                universe: target_clone.clone(),
+                intent: intent_clone.clone(),
+                reply_at,
+                reply_universe: home_clone.clone(),
+                slot,
+                mode,
+                issued_unix: issued,
+                expires_unix: issued + ttl.as_secs() as i64,
+                poll_ms,
+            };
+            let new_doc = phext::replace(doc, probe_coord(&target_clone, slot)?, &probe.render());
+            Ok((new_doc, probe))
+        })?;
+        // Post-commit read-back verification (SPEC §2.3): confirm the slot in
+        // the medium holds our own probe-id; on a concurrent collision, re-slot.
+        let committed = medium.read()?;
+        let back = phext::fetch(&committed, probe_coord(&target, probe.slot)?);
+        if back.contains(&format!("probe-id: {}", probe.id)) {
+            return Ok(ProbeHandle { probe, emitted_at });
         }
-        let nonce = {
-            let seed = format!("{}:{}:{}", from.name, issued, slot);
-            let h = xxhash_rust::xxh64::xxh64(seed.as_bytes(), 0);
-            (h & 0xffff) as u16
-        };
-        let id = format!(
-            "{}@{}#{}-{}-{:04x}",
-            from.name,
-            target,
-            ee_at(issued),
-            slot,
-            nonce
-        );
-        let reply_at = echo_coord(&home, slot, 1)?.to_string();
-        let probe = Probe {
-            id,
-            from: from.clone(),
-            universe: target.clone(),
-            intent: intent.clone(),
-            reply_at,
-            reply_universe: home.clone(),
-            slot,
-            mode,
-            issued_unix: issued,
-            expires_unix: issued + ttl.as_secs() as i64,
-            poll_ms,
-        };
-        let new_doc = phext::replace(doc, probe_coord(&target, slot)?, &probe.render());
-        // Read-back: the slot must hold our own probe-id (SPEC §2.3).
-        let back = phext::fetch(&new_doc, probe_coord(&target, slot)?);
-        if !back.contains(&format!("probe-id: {}", probe.id)) {
-            return Err(Error::Medium("probe read-back mismatch".to_string()));
-        }
-        Ok((new_doc, probe))
-    })?;
-    Ok(ProbeHandle { probe, emitted_at })
+    }
+    Err(Error::Medium(
+        "probe read-back mismatch after concurrent re-slot attempts".to_string(),
+    ))
 }
 
 /// Poll the echo channel until the first echo (mode=first), until expiry

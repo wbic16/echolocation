@@ -85,8 +85,17 @@ MCP tools.
 
 | item | status | notes |
 |---|---|---|
-| Local Rust reference CLI (`FileMedium`) | **LIVE** | Builds and passes `cargo test` on Windows (`rustc 1.90`, edition 2024). `FileMedium` retries transient Windows sharing violations on concurrent read/rename. |
-| Existing SQ MCP bridges (`sq-argon`, `sq-emise`) | **LIVE (read-only)** | Default `SQ_BRIDGE_READONLY=1` refuses `sq_write`; echolocation requires a writable channel (`SQ_BRIDGE_READONLY=0`) scoped to a dedicated medium phext (separate from archival `mailbox.phext`). |
-| `SqMedium` in `src/lib.rs` | **DESIGNED** | `Medium` in `src/lib.rs` currently uses whole-document `read` / `update`; SQ integration needs either an HTTP-backed `SqMedium` or a scroll-granular medium adapter. |
+| Local Rust reference CLI (`FileMedium` & `SqMedium`) | **LIVE** | Builds and passes `cargo test` on Windows (`rustc 1.90`, edition 2024). `FileMedium` retries transient Windows sharing violations; `SqMedium` speaks SQ `/api/v2/get`, `/api/v2/select`, and `POST /api/v2/update` with zero extra dependencies (`--sq-url` / `--phext` / `SQ_API_KEY`). |
+| Antigravity plugin bundle (`providers/antigravity/`) | **LIVE** | Ships `plugin.json`, `mcp_config.json`, `hooks.json` (`SessionStart` inbox drain + `PreToolUse` archive/secret guard), `rules/AGENTS.md`, `skills/echolocation/SKILL.md`, and zero-dep Python 3 stdlib scripts. Copy or register via `plugins.json` and populate env vars. |
+| Existing SQ MCP bridges (`sq-argon`, `sq-emise`) | **LIVE (read-only)** | Default `SQ_BRIDGE_READONLY=1` refuses `sq_write`; echolocation requires a writable channel (`SQ_BRIDGE_READONLY=0` or `ECHOLOCATION_SQ_WRITABLE=1`) scoped to a dedicated medium phext (separate from archival `mailbox.phext`). |
 | Intercortical email binding | **LIVE (external)** | Requires an email MCP plugin (e.g., Gmail/Workspace) or host relay; not bundled by default. |
 | Public real-time ping gate & dual-sonar TLS session | **DESIGNED** | Not yet deployed; will slot into the same MCP server transport layer once live. |
+
+## Installing the bundled plugin
+
+Copy `providers/antigravity/` into `~/.gemini/config/plugins/echolocation`
+(or register it in `~/.gemini/config/plugins.json`), then fill in your
+operator-assigned `ECHOLOCATION_SEAT`, `ECHOLOCATION_MAILBOX_DIR`, and
+optional `PHEXT_AGENT_NAME` / `PHEXT_AGENT_SECRET` / `SQ_API_KEY` values
+inside `mcp_config.json`. The hooks safely no-op when
+`ECHOLOCATION_MAILBOX_DIR` is unset.

@@ -30,9 +30,10 @@ an address you can call.
 - **demo.sh / DEMO.md** — three acts between separate processes over one
   shared `.phext` file: discovery, a cross-universe echo, and a probe
   into silence.
-- **providers/antigravity.md** — substrate integration blueprint for
-  Google Antigravity agents (MCP transport, lifecycle hooks, scheduled
-  pull cadence, secret isolation, and observed SQ bridge gaps).
+- **providers/antigravity.md** & **providers/antigravity/** — substrate
+  integration blueprint and ready-to-enable Antigravity plugin bundle
+  (zero-dep Python stdio MCP server, `SessionStart`/`PreToolUse` hooks,
+  rules, and skill).
 
 ## Definitions
 
@@ -92,9 +93,11 @@ cargo test
   universes you inhabit, answer at most one outstanding probe, never an
   expired one, never the same probe-id twice.
 - `Medium` — the transport trait. `FileMedium` (a shared `.phext` file;
-  lock-file serialized writes, rename commits) and `MemoryMedium` ship;
-  an SQ-hosted medium implements the same two methods against SQ's
-  select/replace surface.
+  lock-file serialized writes, rename commits), `MemoryMedium`, and
+  `SqMedium` (zero-dep HTTP/1.1 client over `std::net::TcpStream` against
+  SQ's `/api/v2/get`, `/api/v2/select`, and `/api/v2/update` surface)
+  all ship. Pass `--sq-url http://127.0.0.1:18766 --phext echolocation`
+  to `echolocate` (with optional `SQ_API_KEY` env var) to run over SQ.
 
 ## Dependencies
 
@@ -393,14 +396,16 @@ transport binding changes:
   assertion, not the signature, is what the gate believes.
 - **The file medium serializes writers with a lock file.** That is
   correct for two programs on one host, which is what the demo runs;
-  high-fan-out discovery wants a server-serialized medium (SQ), which
-  the `Medium` trait exists to allow. Note that v1's `Medium` trait in
-  `src/lib.rs` operates at whole-document granularity (`read` / `update`),
-  while SQ bridges expose scroll-level `select` / `update` (and default
-  to read-only); an `SqMedium` implementation is specified, not yet
-  shipped in `src/lib.rs`.
+  high-fan-out discovery wants a server-serialized medium (`SqMedium`,
+  shipped over `std::net::TcpStream` for plaintext HTTP localhost/tailnet
+  SQ daemons). Note that `SqMedium::update` commits only changed scrolls
+  via `POST /api/v2/update`, and `emit_probe` verifies the committed slot
+  via post-write read-back (SPEC §2.3) so concurrent probers re-slot
+  cleanly. SQ MCP bridges default to read-only (`SQ_BRIDGE_READONLY=1`)
+  and must be explicitly enabled for a writable echolocation phext.
 - **Sandboxed agent substrates isolate secrets out of shell commands.**
   LLM agents running in network-sandboxed terminals (e.g., Antigravity;
-  see `providers/antigravity.md`) should keep `x-phext-agent-secret` in
-  an MCP server or host-sidecar environment rather than passing it via
-  shell commands or model context, preserving Protocol Rule 3.
+  see `providers/antigravity.md` and the plugin bundle in
+  `providers/antigravity/`) should keep `x-phext-agent-secret` in an MCP
+  server or host-sidecar environment rather than passing it via shell
+  commands or model context, preserving Protocol Rule 3.

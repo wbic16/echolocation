@@ -364,3 +364,195 @@ fn cli_range_reports_both_prober_and_responder_poll_ms() {
         stdout
     );
 }
+
+#[test]
+fn sq_medium_exchange_and_auth() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+
+    fn pct_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                    if let Ok(v) = u8::from_str_radix(hex, 16) {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock SQ");
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let doc = Arc::new(Mutex::new(String::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let expected_key = "test-sq-key";
+
+    let server_doc = doc.clone();
+    let server_stop = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !server_stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 2048];
+                    let header_end;
+                    loop {
+                        let n = match stream.read(&mut tmp) {
+                            Ok(0) | Err(_) => {
+                                header_end = 0;
+                                break;
+                            }
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = pos + 4;
+                            break;
+                        }
+                    }
+                    if header_end == 0 {
+                        continue;
+                    }
+                    let headers = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                    let content_len: usize = headers
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut body = buf[header_end..].to_vec();
+                    while body.len() < content_len {
+                        let n = stream.read(&mut tmp).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&tmp[..n]);
+                    }
+                    body.truncate(content_len);
+
+                    let auth_ok = headers.lines().any(|l| {
+                        l.to_ascii_lowercase()
+                            .starts_with("authorization:")
+                            && l.contains(expected_key)
+                    });
+                    if !auth_ok {
+                        let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized";
+                        let _ = stream.write_all(resp.as_bytes());
+                        continue;
+                    }
+
+                    let req_line = headers.lines().next().unwrap_or("");
+                    let target = req_line.split_whitespace().nth(1).unwrap_or("");
+                    let (route, query) = target.split_once('?').unwrap_or((target, ""));
+                    let mut params = std::collections::HashMap::new();
+                    for pair in query.split('&') {
+                        if let Some((k, v)) = pair.split_once('=') {
+                            params.insert(pct_decode(k), pct_decode(v));
+                        }
+                    }
+
+                    let reply = if req_line.starts_with("GET ") && route == "/api/v2/get" {
+                        server_doc.lock().unwrap().clone()
+                    } else if req_line.starts_with("GET ") && route == "/api/v2/select" {
+                        let c = phext::to_coordinate(params.get("c").map(|s| s.as_str()).unwrap_or("1.1.1/1.1.1/1.1.1"));
+                        phext::fetch(&server_doc.lock().unwrap(), c)
+                    } else if req_line.starts_with("POST ") && route == "/api/v2/update" {
+                        let c = phext::to_coordinate(params.get("c").map(|s| s.as_str()).unwrap_or("1.1.1/1.1.1/1.1.1"));
+                        let text = String::from_utf8_lossy(&body).into_owned();
+                        let mut guard = server_doc.lock().unwrap();
+                        *guard = phext::replace(&guard, c, &text);
+                        "Updated".to_string()
+                    } else {
+                        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
+                        let _ = stream.write_all(resp.as_bytes());
+                        continue;
+                    };
+
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        reply.len(),
+                        reply
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let base_url = format!("http://{}", addr);
+
+    // Wrong key must fail loudly.
+    let mut bad_sq = SqMedium::new(&base_url, "echolocation", Some("wrong-key".to_string())).unwrap();
+    assert!(bad_sq.read().is_err(), "unauthorized SQ read must return Err");
+
+    // HTTPS must fail clearly (zero-dep TcpStream is plaintext HTTP).
+    assert!(SqMedium::new("https://example.com", "echolocation", None).is_err());
+
+    // Run responder and prober against the mock SQ host.
+    let r_url = base_url.clone();
+    let r_stop = stop.clone();
+    let responder_thread = std::thread::spawn(move || {
+        let mut m = SqMedium::new(&r_url, "echolocation", Some(expected_key.to_string())).unwrap();
+        let responder = sig("sq-seat", "1.1.1/1.1.1/9.4.1", &["time-census"]);
+        publish_signature(&mut m, &responder).unwrap();
+        while !r_stop.load(Ordering::Relaxed) {
+            if let Ok(Some(_)) = answer_once(
+                &mut m,
+                &responder,
+                "1.1.1",
+                &["1.1.1".to_string()],
+                Some("sq-ready"),
+                Some("1.1.1/1.4.1/1.1.1"),
+                50,
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    });
+
+    let mut prober_sq = SqMedium::new(&base_url, "echolocation", Some(expected_key.to_string())).unwrap();
+    let prober = sig("mira-sq", "1.1.1/1.1.1/9.1.1", &["time-census"]);
+    let handle = emit_probe(
+        &mut prober_sq,
+        &prober,
+        "1.1.1",
+        "1.1.1",
+        "time-census",
+        Duration::from_secs(6),
+        CollectMode::First,
+        50,
+    )
+    .unwrap();
+    let exchange = await_echo(&mut prober_sq, &handle).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    responder_thread.join().unwrap();
+    server.join().unwrap();
+
+    match exchange.outcome {
+        ExchangeOutcome::Echoed => {}
+        ExchangeOutcome::Expired => panic!("expected echo over SqMedium"),
+    }
+    assert_eq!(exchange.echoes.len(), 1);
+    assert_eq!(exchange.echoes[0].from.name, "sq-seat");
+    assert_eq!(exchange.echoes[0].poll_ms, 50);
+    assert_eq!(exchange.echoes[0].state.as_deref(), Some("sq-ready"));
+}

@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "echolocation": {
+      "command": "python",
+      "args": ["scripts/echolocation_mcp.py"],
+      "env": {
+        "ECHOLOCATION_SEAT": "",
+        "ECHOLOCATION_MAILBOX_DIR": "",
+        "ECHOLOCATION_SQ_URL": "http://127.0.0.1:18766",
+        "ECHOLOCATION_SQ_PHEXT": "echolocation",
+        "ECHOLOCATION_SQ_WRITABLE": "0",
+        "SQ_API_KEY": "",
+        "PHEXT_SSO_URL": "https://edit.phext.io",
+        "PHEXT_AGENT_NAME": "",
+        "PHEXT_AGENT_SECRET": ""
+      }
+    }
+  }
+}

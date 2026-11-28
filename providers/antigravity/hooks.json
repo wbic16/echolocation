@@ -1,0 +1,25 @@
+{
+  "echolocation-session-drain": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python scripts/session_start_drain.py",
+        "timeout": 10
+      }
+    ]
+  },
+  "echolocation-protocol-guards": {
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|.*echolocation_write_outbox.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/pre_tool_guard.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

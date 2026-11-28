@@ -2,13 +2,16 @@
 //!
 //! Two roles, one binary, no prior introduction between them:
 //!
-//!   echolocate answer --medium M --name N --home COORD --capabilities a,b
+//!   echolocate answer (--medium M | --sq-url URL --phext NAME [--sq-key K])
+//!                     --name N --home COORD --capabilities a,b
 //!                     [--state "..."] [--mailbox COORD] [--universe U]
 //!                     [--listen U1,U2] [--for SECONDS] [--poll-ms 100]
-//!   echolocate probe  --medium M --name N --home COORD --capabilities a,b
+//!   echolocate probe  (--medium M | --sq-url URL --phext NAME [--sq-key K])
+//!                     --name N --home COORD --capabilities a,b
 //!                     [--universe U] [--target U] [--intent CAP|any]
 //!                     [--ttl SECONDS] [--mode first|all] [--poll-ms 100]
 //!
+//! When `--sq-url` is given, `--sq-key` falls back to the `SQ_API_KEY` env var.
 //! `answer` publishes its signature scroll at its home coordinate, then
 //! scans the probe channels of the universes it inhabits and echoes.
 //! `probe` emits a probe and reports whoever answers, with the range.
@@ -49,8 +52,43 @@ fn stamp() -> String {
     format!("{} EE {}", format_utc(now), ee_at(now))
 }
 
+enum CliMedium {
+    File(FileMedium),
+    Sq(SqMedium),
+}
+
+impl Medium for CliMedium {
+    fn read(&mut self) -> Result<String> {
+        match self {
+            CliMedium::File(m) => m.read(),
+            CliMedium::Sq(m) => m.read(),
+        }
+    }
+
+    fn update<T>(&mut self, f: &mut dyn FnMut(&str) -> Result<(String, T)>) -> Result<T> {
+        match self {
+            CliMedium::File(m) => m.update(f),
+            CliMedium::Sq(m) => m.update(f),
+        }
+    }
+}
+
+fn open_medium(o: &HashMap<String, String>) -> Result<CliMedium> {
+    if let Some(sq_url) = o.get("sq-url") {
+        let phext = get(o, "phext", "echolocation");
+        let auth_key = o
+            .get("sq-key")
+            .cloned()
+            .or_else(|| std::env::var("SQ_API_KEY").ok())
+            .filter(|k| !k.trim().is_empty());
+        Ok(CliMedium::Sq(SqMedium::new(sq_url, &phext, auth_key)?))
+    } else {
+        let medium_path = PathBuf::from(get(o, "medium", "medium.phext"));
+        Ok(CliMedium::File(FileMedium::new(medium_path)))
+    }
+}
+
 fn run_answer(o: HashMap<String, String>) -> Result<()> {
-    let medium_path = PathBuf::from(get(&o, "medium", "medium.phext"));
     let name = get(&o, "name", "responder");
     let home = get(&o, "home", "1.1.1/1.1.1/9.1.1");
     let universe = get(&o, "universe", "1.1.1");
@@ -61,7 +99,7 @@ fn run_answer(o: HashMap<String, String>) -> Result<()> {
     let for_secs: u64 = get(&o, "for", "0").parse().unwrap_or(0);
 
     let sig = Signature::new(&name, &home, csv(&get(&o, "capabilities", "")))?;
-    let mut medium = FileMedium::new(medium_path);
+    let mut medium = open_medium(&o)?;
     publish_signature(&mut medium, &sig)?;
     println!(
         "[{}] {} answering in universe {} (listening: {}), home {}, capabilities: {}",
@@ -103,7 +141,6 @@ fn run_answer(o: HashMap<String, String>) -> Result<()> {
 }
 
 fn run_probe(o: HashMap<String, String>) -> Result<()> {
-    let medium_path = PathBuf::from(get(&o, "medium", "medium.phext"));
     let name = get(&o, "name", "prober");
     let home = get(&o, "home", "1.1.1/1.1.1/9.1.1");
     let universe = get(&o, "universe", "1.1.1");
@@ -114,7 +151,7 @@ fn run_probe(o: HashMap<String, String>) -> Result<()> {
     let mode = CollectMode::parse(&get(&o, "mode", "all"));
 
     let sig = Signature::new(&name, &home, csv(&get(&o, "capabilities", "")))?;
-    let mut medium = FileMedium::new(medium_path);
+    let mut medium = open_medium(&o)?;
     let handle = emit_probe(
         &mut medium,
         &sig,
