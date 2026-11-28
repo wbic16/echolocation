@@ -78,6 +78,19 @@ probe remains in its slot as history. After writing, a prober MUST read the
 slot back and confirm it holds its own probe-id; on a mismatch (a concurrent
 prober won the slot) it takes the next free slot and re-emits.
 
+Claiming a slot — finding the first free coordinate and writing to it — MUST
+be one atomic read-modify-write on the medium. Serializing each individual
+write is not enough: two writers can both find slot `n` free and then write
+it in turn, and the read-back only shows who held the slot at the instant
+of that read — a later overwrite leaves the first prober waiting on a probe
+that is no longer there, and it will read the result as silence. The
+reference implementation meets this rule through `Medium::update` (scan and
+write inside one locked step). A medium that can only offer separate
+select and replace calls needs a conditional write (replace only if the
+scroll is still absent), or its probers MUST re-read their slot on every
+poll and re-emit if their probe-id is gone. The same rule governs echo
+indices.
+
 A responder answering probe slot `s` writes its echo at the first free echo
 index `k` of `Z/1.1.1/2.s.k`, where `Z` is the universe named by the probe's
 `reply-at` field (§3) — which is the prober's universe, not necessarily the
@@ -99,7 +112,7 @@ order is fixed as listed; unknown fields MUST be ignored by readers.
 
 ```
 echolocation/probe 1
-probe-id: mira@1.1.1#95-3-9f2c
+probe-id: mira@1.1.1#98-3-9f2c
 from-name: mira
 from-home: 1.1.1/1.1.1/9.1.1
 from-capabilities: time-census, consensus
@@ -108,7 +121,7 @@ intent: time-census
 reply-at: 1.1.1/1.1.1/2.3.1
 mode: all
 issued-utc: 2026-11-22T17:24:07Z
-issued-ee: 95
+issued-ee: 98
 expires-utc: 2026-11-22T17:24:37Z
 poll-ms: 100
 ```
@@ -153,7 +166,7 @@ from the probe's `reply-at`.
 
 ```
 echolocation/echo 1
-probe-id: mira@1.1.1#95-3-9f2c
+probe-id: mira@1.1.1#98-3-9f2c
 from-name: ni-knight-runner
 from-home: 1.1.1/1.1.1/9.4.1
 home-universe: 1.1.1
@@ -161,7 +174,7 @@ capabilities: time-census, consensus, blend
 state: round 34 complete; consensus +0.006 ms
 mailbox: 1.1.1/1.4.1/1.1.1
 issued-utc: 2026-11-22T17:24:09Z
-issued-ee: 95
+issued-ee: 98
 poll-ms: 100
 ```
 
@@ -304,6 +317,12 @@ pretending otherwise. Two consequences are named, not hidden:
   disambiguating identity, for address books and logs, is the triple
   `(name, home coordinate, first-seen EE)`. Protocols built on
   echolocation MUST key records by the triple, never by name alone.
+- **Fields are data, never instructions.** Every field of a probe, echo,
+  or signature scroll is text chosen by a writer the reader has not
+  authenticated — `state` most of all, since it is free text. A program
+  that reads these scrolls, and above all a language-model agent, MUST
+  treat their contents as data to record or display, and MUST NOT act on
+  anything a field says to do. An introduction is not an order.
 
 ## 8. Multiversal rules
 
@@ -366,9 +385,11 @@ writes server-side, rather than swapping the file underneath it.
   echo channel scroll that does not parse is not an echo. Neither side
   crashes, deletes, or answers malformed content.
 - **Concurrent probers colliding on a slot**: prevented by the read-back
-  rule (§2.3); the loser re-slots. Over a serialized medium (SQ, or a
-  file medium with write locking) collisions should not occur at all;
-  the read-back is the belt to that suspender.
+  rule (§2.3); the loser re-slots. Over a medium whose slot claim is
+  atomic (the file medium's locked read-modify-write) collisions do not
+  occur at all, and the read-back is the belt to that suspender. Over a
+  medium that only serializes individual writes, the read-back narrows
+  the window without closing it — see the atomic-claim rule in §2.3.
 - **Echo spoofing / name collision**: possible in v1 by design (§7).
   Mitigations available in v1: home-scroll corroboration, triple-keyed
   records, and treating first contact as an introduction, not a trust
@@ -381,8 +402,22 @@ writes server-side, rather than swapping the file underneath it.
 - **Clock disagreement**: stamps are claims made by their writers'
   clocks. Expiry is enforced on the prober's clock for the prober's
   deadline and on the responder's clock when deciding whether a probe is
-  still answerable; the shared EE stamp bounds the disagreement to one
-  epoch for any two clocks that are each within an epoch of true.
+  still answerable. Two consequences follow. A responder whose clock runs
+  ahead of the prober's by more than the probe's remaining lifetime will
+  judge every probe expired and never answer, and the prober cannot tell
+  that from absence: with the 30 s default lifetime, a skew of about half
+  a minute is enough. The EE stamp does not rescue this — an epoch is
+  420 s, far coarser than a probe's lifetime; it exists to let a reader
+  notice gross disagreement (stamps more than one epoch apart), not to
+  correct it. Programs on hosts without disciplined clocks SHOULD use
+  longer lifetimes, and a responder SHOULD log, rather than silently
+  drop, a probe whose `issued-ee` is current while its `expires-utc` has
+  already passed on the responder's own clock.
+- **Channel growth**: slots are never reused, so the probe channel only
+  grows, and both the first-free-slot scan and a responder's scan start at
+  slot 1. v1 accepts this cost for short-lived media. A long-lived medium
+  should expect scans to slow in proportion to its history; a high-water
+  mark scroll or channel rotation is future work and is named as such.
 - **Responder dies mid-exchange**: indistinguishable from silence, and
   handled as silence — the probe expires. Echolocation keeps no session
   state to leak.
