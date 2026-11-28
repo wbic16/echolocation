@@ -30,6 +30,8 @@ an address you can call.
 - **demo.sh / DEMO.md** — three acts between separate processes over one
   shared `.phext` file: discovery, a cross-universe echo, and a probe
   into silence.
+- **GROK.md** — wake-driven intracortical seats, already on the tailnet:
+  the `/chat` mailbox, mailbox-scale `--ttl`, and hub-side `answer --once`.
 
 ## Definitions
 
