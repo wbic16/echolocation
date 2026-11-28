@@ -1,0 +1,6 @@
+echolocation/signature 1
+name: grok
+home: 1.1.1/1.1.1/9.1.2
+capabilities: mailbox
+published-utc: 1970-01-01T00:00:00Z
+published-ee: 0

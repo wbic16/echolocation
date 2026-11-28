@@ -4,14 +4,18 @@
 //!
 //!   echolocate answer --medium M --name N --home COORD --capabilities a,b
 //!                     [--state "..."] [--mailbox COORD] [--universe U]
-//!                     [--listen U1,U2] [--for SECONDS] [--poll-ms 100]
+//!                     [--listen U1,U2] [--once | --for SECONDS] [--poll-ms 100]
 //!   echolocate probe  --medium M --name N --home COORD --capabilities a,b
 //!                     [--universe U] [--target U] [--intent CAP|any]
 //!                     [--ttl SECONDS] [--mode first|all] [--poll-ms 100]
 //!
 //! `answer` publishes its signature scroll at its home coordinate, then
 //! scans the probe channels of the universes it inhabits and echoes.
+//! `--once` performs a single scan and exits after at most one echo.
+//! `--for N` scans until N seconds have elapsed. With neither flag,
+//! `answer` listens until the process is killed.
 //! `probe` emits a probe and reports whoever answers, with the range.
+//! `--ttl` is the probe lifetime in seconds (default 30).
 
 use echolocation::*;
 use std::collections::HashMap;
@@ -22,14 +26,29 @@ fn opts(args: &[String]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i].starts_with("--") && i + 1 < args.len() {
-            map.insert(args[i][2..].to_string(), args[i + 1].clone());
-            i += 2;
+        if let Some(key) = args[i].strip_prefix("--") {
+            if key.is_empty() {
+                i += 1;
+                continue;
+            }
+            let next_is_value = i + 1 < args.len() && !args[i + 1].starts_with("--");
+            if next_is_value {
+                map.insert(key.to_string(), args[i + 1].clone());
+                i += 2;
+            } else {
+                // A bare flag (`--once`) is the boolean true.
+                map.insert(key.to_string(), "true".to_string());
+                i += 1;
+            }
         } else {
             i += 1;
         }
     }
     map
+}
+
+fn flag(o: &HashMap<String, String>, key: &str) -> bool {
+    matches!(o.get(key).map(String::as_str), Some("true" | "1" | "yes"))
 }
 
 fn get(o: &HashMap<String, String>, key: &str, default: &str) -> String {
@@ -59,14 +78,18 @@ fn run_answer(o: HashMap<String, String>) -> Result<()> {
     let state = o.get("state").cloned();
     let mailbox = o.get("mailbox").cloned();
     let for_secs: u64 = get(&o, "for", "0").parse().unwrap_or(0);
+    // One scan, at most one echo, then exit. Wins over `--for`: a caller
+    // that passed both still gets answer_once a single time.
+    let once = flag(&o, "once");
 
     let sig = Signature::new(&name, &home, csv(&get(&o, "capabilities", "")))?;
     let mut medium = FileMedium::new(medium_path);
     publish_signature(&mut medium, &sig)?;
     println!(
-        "[{}] {} answering in universe {} (listening: {}), home {}, capabilities: {}",
+        "[{}] {} answering{} in universe {} (listening: {}), home {}, capabilities: {}",
         stamp(),
         name,
+        if once { " once" } else { "" },
         universe,
         listen.join(", "),
         home,
@@ -93,7 +116,20 @@ fn run_answer(o: HashMap<String, String>) -> Result<()> {
                     info.echo_coord
                 );
             }
-            None => std::thread::sleep(Duration::from_millis(poll_ms.max(10))),
+            None => {
+                if once {
+                    println!(
+                        "[{}] {} answered no probe (absence, not assent)",
+                        stamp(),
+                        name
+                    );
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(poll_ms.max(10)));
+            }
+        }
+        if once {
+            return Ok(());
         }
         if for_secs > 0 && started.elapsed() >= Duration::from_secs(for_secs) {
             println!("[{}] {} done listening", stamp(), name);
@@ -175,6 +211,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("usage: echolocate <probe|answer> [--medium PATH] [--name N] [--home COORD] ...");
+        eprintln!("       echolocate answer --once | [--for SECONDS]");
+        eprintln!("       echolocate probe [--ttl SECONDS] [--mode first|all]");
         std::process::exit(2);
     }
     let o = opts(&args[1..]);
